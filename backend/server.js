@@ -51,7 +51,7 @@ for(const col of ['compare_price INTEGER NOT NULL DEFAULT 0']){try{db.exec(`ALTE
 for(const col of [
   'customer_id INTEGER',"customer_email TEXT NOT NULL DEFAULT ''",'subtotal INTEGER NOT NULL DEFAULT 0','delivery_fee INTEGER NOT NULL DEFAULT 0',
   "city TEXT NOT NULL DEFAULT ''","province TEXT NOT NULL DEFAULT ''","notes TEXT NOT NULL DEFAULT ''",
-  "courier TEXT NOT NULL DEFAULT ''","tracking_no TEXT NOT NULL DEFAULT ''","courier_tracking_no TEXT NOT NULL DEFAULT ''","tracking_url TEXT NOT NULL DEFAULT ''"
+  "courier TEXT NOT NULL DEFAULT ''","tracking_no TEXT NOT NULL DEFAULT ''","courier_tracking_no TEXT NOT NULL DEFAULT ''","tracking_url TEXT NOT NULL DEFAULT ''","payment_method TEXT NOT NULL DEFAULT 'COD'","transaction_id TEXT NOT NULL DEFAULT ''","payment_status TEXT NOT NULL DEFAULT 'COD'"
 ]){try{db.exec(`ALTER TABLE orders ADD COLUMN ${col}`)}catch{}}
 
 if(!db.prepare('SELECT id FROM admins WHERE email=?').get(ADMIN_EMAIL)){
@@ -107,6 +107,7 @@ app.get('/api/customer/orders',customerAuth,(req,res)=>res.json(db.prepare('SELE
 app.post('/api/orders',customerAuth,(req,res)=>{
   const c=db.prepare('SELECT * FROM customers WHERE id=?').get(req.customer.id);if(!c)return res.status(401).json({error:'Please login again'});
   const customer_name=String(req.body.customer_name||c.name).trim(),customer_email=c.email,phone=String(req.body.phone||c.phone).trim(),address=String(req.body.address||c.address).trim(),city=String(req.body.city||c.city).trim(),province=String(req.body.province||c.province).trim(),notes=String(req.body.notes||'').trim(),items=req.body.items;
+  const payment_method=req.body.payment_method==='Easypaisa'?'Easypaisa':'COD',transaction_id=String(req.body.transaction_id||'').trim(),payment_status=payment_method==='Easypaisa'?'Payment Pending':'COD';if(payment_method==='Easypaisa'&&transaction_id.length<4)return res.status(400).json({error:'Enter Easypaisa Transaction ID'});
   if(!customer_name||!phone||!address||!Array.isArray(items)||!items.length)return res.status(400).json({error:'Complete name, phone, address and cart details required'});
   const get=db.prepare('SELECT * FROM products WHERE id=?');let subtotal=0;const valid=[];
   for(const i of items){const p=get.get(Number(i.product_id)),q=Number(i.quantity);if(!p||!Number.isInteger(q)||q<1||q>p.stock)return res.status(400).json({error:'Product stock changed. Please refresh cart.'});subtotal+=p.price*q;valid.push({p,q})}
@@ -114,12 +115,12 @@ app.post('/api/orders',customerAuth,(req,res)=>{
   let tracking=makeTracking();while(db.prepare('SELECT id FROM orders WHERE tracking_no=?').get(tracking))tracking=makeTracking();
   const trackingUrl=`${baseUrl(req)}/?tracking=${encodeURIComponent(tracking)}`;
   const create=db.transaction(()=>{
-    const o=db.prepare('INSERT INTO orders(customer_id,customer_name,customer_email,phone,address,city,province,notes,subtotal,delivery_fee,total,tracking_no,tracking_url) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)').run(c.id,customer_name,customer_email,phone,address,city,province,notes,subtotal,delivery,total,tracking,trackingUrl);
+    const o=db.prepare('INSERT INTO orders(customer_id,customer_name,customer_email,phone,address,city,province,notes,subtotal,delivery_fee,total,tracking_no,tracking_url,payment_method,transaction_id,payment_status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(c.id,customer_name,customer_email,phone,address,city,province,notes,subtotal,delivery,total,tracking,trackingUrl,payment_method,transaction_id,payment_status);
     for(const x of valid){db.prepare('INSERT INTO order_items(order_id,product_id,quantity,price) VALUES(?,?,?,?)').run(o.lastInsertRowid,x.p.id,x.q,x.p.price);db.prepare('UPDATE products SET stock=stock-? WHERE id=?').run(x.q,x.p.id)}
     db.prepare('UPDATE customers SET name=?,phone=?,address=?,city=?,province=? WHERE id=?').run(customer_name,phone,address,city,province,c.id);
     return Number(o.lastInsertRowid);
   });
-  const orderId=create();res.status(201).json({order_id:orderId,tracking_no:tracking,tracking_url:trackingUrl,subtotal,delivery_fee:delivery,total});
+  const orderId=create();res.status(201).json({order_id:orderId,tracking_no:tracking,tracking_url:trackingUrl,subtotal,delivery_fee:delivery,total,payment_method,payment_status});
 });
 app.get('/api/orders/:id/track',(req,res)=>{const o=db.prepare('SELECT id,phone,total,status,courier,tracking_no,courier_tracking_no,tracking_url,created_at FROM orders WHERE id=?').get(req.params.id);if(!o||normalizePhone(o.phone)!==normalizePhone(req.query.phone))return res.status(404).json({error:'Order not found. Check order number and phone.'});res.json(o)});
 app.get('/api/track/:tracking',(req,res)=>{const o=db.prepare('SELECT id,phone,total,status,courier,tracking_no,courier_tracking_no,tracking_url,created_at FROM orders WHERE upper(tracking_no)=upper(?)').get(req.params.tracking);if(!o)return res.status(404).json({error:'Tracking ID not found'});if(req.query.phone&&normalizePhone(o.phone)!==normalizePhone(req.query.phone))return res.status(404).json({error:'Tracking ID and phone do not match'});res.json(o)});
@@ -134,10 +135,11 @@ app.post('/api/admin/products',adminAuth,upload.single('image'),(req,res)=>{cons
 app.patch('/api/admin/products/:id',adminAuth,(req,res)=>{const p=db.prepare('SELECT * FROM products WHERE id=?').get(req.params.id);if(!p)return res.status(404).json({error:'Product not found'});const name=String(req.body.name??p.name).trim();const category=req.body.category??p.category;const price=Number(req.body.price??p.price),compare_price=Number(req.body.compare_price??p.compare_price??0),stock=Number(req.body.stock??p.stock),description=req.body.description??p.description,image=req.body.image??p.image;if(!name||!categories.includes(category)||!Number.isFinite(price)||price<0||!Number.isFinite(compare_price)||compare_price<0||!Number.isInteger(stock)||stock<0)return res.status(400).json({error:'Invalid product data'});db.prepare('UPDATE products SET name=?,category=?,price=?,compare_price=?,stock=?,image=?,description=? WHERE id=?').run(name,category,price,compare_price,stock,image,description,req.params.id);res.json({ok:true})});
 app.patch('/api/admin/orders/:id',adminAuth,(req,res)=>{const allowed=['Pending','Confirmed','Ready to Ship','Shipped','Delivered','Cancelled'];if(!allowed.includes(req.body.status))return res.status(400).json({error:'Invalid status'});db.prepare('UPDATE orders SET status=? WHERE id=?').run(req.body.status,req.params.id);res.json({ok:true})});
 app.patch('/api/admin/orders/:id/tracking',adminAuth,(req,res)=>{const courier=String(req.body.courier||'').trim(),tracking=String(req.body.tracking_no||'').trim();db.prepare("UPDATE orders SET courier=?,courier_tracking_no=?,status=CASE WHEN ?<>'' THEN 'Shipped' ELSE status END WHERE id=?").run(courier,tracking,tracking,req.params.id);res.json({ok:true})});
+app.patch('/api/admin/orders/:id/payment',adminAuth,(req,res)=>{const s=String(req.body.payment_status||'');if(!['Payment Pending','Paid','Rejected','COD'].includes(s))return res.status(400).json({error:'Invalid payment status'});db.prepare('UPDATE orders SET payment_status=? WHERE id=?').run(s,req.params.id);res.json({ok:true})});
 app.post('/api/admin/orders/:id/create-shipment',adminAuth,(_req,res)=>res.status(501).json({error:'Courier API is not connected yet. Add your courier account/API credentials first.'}));
 app.delete('/api/admin/products/:id',adminAuth,(req,res)=>{const p=db.prepare('SELECT image FROM products WHERE id=?').get(req.params.id);try{db.prepare('DELETE FROM products WHERE id=?').run(req.params.id)}catch{return res.status(409).json({error:'This product is used in an order and cannot be deleted. Set stock to 0 instead.'})}if(p?.image?.startsWith('/uploads/'))try{fs.unlinkSync(path.join(root,p.image))}catch{}res.json({ok:true})});
 
 app.get('/admin/',(_r,res)=>res.sendFile(path.join(root,'admin/index.html')));
 app.get('*',(_r,res)=>res.sendFile(path.join(root,'frontend/index.html')));
 app.use((err,_r,res,_n)=>res.status(400).json({error:err.message||'Request failed'}));
-app.listen(PORT,()=>{console.log(`\nNOVA DIGITAL v5: http://localhost:${PORT}`);console.log(`ADMIN: http://localhost:${PORT}/admin/`)});
+app.listen(PORT,()=>{console.log(`\nNOVA DIGITAL v6: http://localhost:${PORT}`);console.log(`ADMIN: http://localhost:${PORT}/admin/`)});
